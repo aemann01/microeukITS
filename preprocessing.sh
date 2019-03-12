@@ -1,6 +1,96 @@
 #!/bin/bash
 # Quality filter, merge, and process raw data
-# Use: ./
-###################
-#Demultiplexing
-###################
+# Use: ./preprocessing.sh
+# Downloaded demultiplexed data from deepthought, moved to histolytica in folder called raw
+
+VSEARCH=/usr/local/bin/vsearch
+
+#########################
+#Trim primers & adapters
+#########################
+cd /Volumes/histolytica/its/raw
+mkdir ../trim
+echo "Trimming adapter and primer sequences"
+ls *R1* | sed 's/_L001.*//' | parallel -j4 'cutadapt -a AATGATACGGCGACCACCGAGATCTAC -A CAAGCAGAAGACGGCATACGAGAT --trim-n -m 50 -o ../trim/{}.R1.trim.fastq -p ../trim/{}.R2.trim.fastq {}_L001_R1_001.fastq.gz {}_L001_R2_001.fastq.gz 1>../trim/{}.adapt.trim.info'
+cd ../trim
+ls *R1* | sed 's/.R1.trim.fastq//' | parallel -j4 'cutadapt -a TCCGTAGGTGAACCTGCGG  -A CGGCTGCGTTCTTCATCGATGC  -o {}.R1.trimprimer.fastq -p {}.R2.trimprimer.fastq  {}.R1.trim.fastq {}.R2.trim.fastq 1> {}.primer.trim.info'
+rm *trim.fastq
+
+#########################
+#Read merging
+#########################
+echo "Paired end read merging"
+mkdir ../pear
+#merge paired end reads
+ls *R1* | sed 's/.R1.trimprimer.fastq//' | parallel -j4 'pear -f {}.R1.trimprimer.fastq -r {}.R2.trimprimer.fastq -o ../pear/{} -q 30 -t 50 -n 50 1>../pear/{}.out'
+rm *trimprimer.fastq
+cd ../pear
+#get stats on merge rates
+ls *out | sed 's/_.*//' > list
+ls *out | while read line; do grep "Assembled reads ...................:" $line | grep -v "file" | awk -F":" '{print $2}' | awk -F" " '{print $4}' | sed 's/(//' | sed 's/)//' ; done > pmerge
+paste list pmerge > mergerate.txt
+rm list pmerge
+#get rid of unmerged reverse and discarded read files
+rm *discarded.fastq *unassembled.reverse.fastq
+#remove empty files
+find . -empty -delete
+
+#########################
+#Convert to fastq
+#########################
+echo "Fastq to fasta"
+#convert to fasta and add sequence headers to both the merged and unmerged forward reads
+ls *assembled.fastq | sed 's/.fastq//' | parallel -j4 'fastq_to_fasta -i {}.fastq -o {}.fasta -Q 33'
+ls *unassembled.forward.fastq | sed 's/.fastq//' | parallel -j4 'fastq_to_fasta -i {}.fastq -o {}.fasta -Q 33'
+#remove fastq
+rm *fastq
+#to keep fastq and zip up uncomment below
+#ls *fastq | parallel 'gzip {}' &
+
+echo "Adding headers and cleaning up"
+#add headers
+ls *assembled.fasta | sed 's/.assembled.fasta//' | while read line; do awk '/^>/{print ">'$line'."; next} {print}' < $line.assembled.fasta > $line.assembled.headers.fa; done
+rm *assembled.fasta
+ls *unassembled.forward.fasta | sed 's/.unassembled.forward.fasta//' | while read line; do awk '/^>/{print ">'$line'."; next} {print}' < $line.unassembled.forward.fasta > $line.unassembled.forward.headers.fa; done
+rm *unassembled.forward.fasta
+ls *assembled.headers.fa | sed 's/.assembled.headers.fa//' | while read line; do cat $line.assembled.headers.fa $line.unassembled.forward.headers.fa > $line.full.fa; done
+ls *full.fa | sed 's/.full.fa//' | while read line; do awk '/^>/{$0=$0""(++i)}1' $line.full.fa > $line.full.fix.fa; done
+cat *full.fix.fa > combinedseq.fa
+#clean up files
+rm *full.fa
+rename 's/full.fix.fa/full.fa/' *full.fix.fa
+rm *headers* *full*
+cd ..
+mkdir vsearch
+
+#########################
+#Denovo ref database 
+#########################
+#get representative sequences from dereplicated and sorted sequences
+echo "Generating representative sequences file"
+vsearch --derep_full pear/combinedseq.fa --output pear/combinedseq.derep.fa --sizeout --minuniquesize 10
+vsearch --sortbylength pear/combinedseq.derep.fa --sizeout --output pear/combinedseq.sort.fa
+vsearch --cluster_unoise pear/combinedseq.sort.fa --relabel OTU_ --centroids vsearch/repset.fa --sizein --sizeout 
+
+#########################
+#Chimera check
+#########################
+echo "Chimera check"
+vsearch --uchime_denovo vsearch/repset.fa --chimeras vsearch/repset.chims.fa --nonchimeras vsearch/repset.nonchim.fa
+
+#########################
+#OTU picking
+#########################
+echo "Picking OTUs"
+vsearch --usearch_global pear/combinedseq.fa --db vsearch/repset.nonchim.fa --strand plus --uc vsearch/map.uc --maxaccepts 10 --id 0.99
+
+#########################
+#Taxonomy assignment
+#########################
+echo "Assigning taxonomy"
+mkdir tax
+## BLAST APPROACH
+echo "Get taxonomy assignments for repset using BLAST"
+##NOTE: running these on the lab server, cruncher 1 
+#lower pid threshold to get more results, need to filter these by the length of the query alignment after the text file is generated
+cat repset.nonchim.fa | parallel --block 100k --recstart '>' --pipe blastn -evalue 1e-10 -max_target_seqs 500 -perc_identity 0.90 -db /parfreylab/shared/databases/NCBI_NT/NT_06.08.2018/nt -outfmt 6 -query - > blast.out
