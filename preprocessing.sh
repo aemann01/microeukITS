@@ -11,7 +11,7 @@ VSEARCH=/usr/local/bin/vsearch
 cd /Volumes/histolytica/its/raw
 mkdir ../trim
 echo "Trimming adapter and primer sequences"
-ls *R1* | sed 's/_L001.*//' | parallel -j4 'cutadapt -a AATGATACGGCGACCACCGAGATCTAC -A CAAGCAGAAGACGGCATACGAGAT --trim-n -m 50 -o ../trim/{}.R1.trim.fastq -p ../trim/{}.R2.trim.fastq {}_L001_R1_001.fastq.gz {}_L001_R2_001.fastq.gz 1>../trim/{}.adapt.trim.info'
+ls *R1* | sed 's/_L001.*//' | parallel -j4 'cutadapt -a AATGATACGGCGACCACCGAGATCTAC -A CAAGCAGAAGACGGCATACGAGAT --trim-n -o ../trim/{}.R1.trim.fastq -p ../trim/{}.R2.trim.fastq {}_L001_R1_001.fastq.gz {}_L001_R2_001.fastq.gz 1>../trim/{}.adapt.trim.info'
 cd ../trim
 ls *R1* | sed 's/.R1.trim.fastq//' | parallel -j4 'cutadapt -a TCCGTAGGTGAACCTGCGG  -A CGGCTGCGTTCTTCATCGATGC  -o {}.R1.trimprimer.fastq -p {}.R2.trimprimer.fastq  {}.R1.trim.fastq {}.R2.trim.fastq 1> {}.primer.trim.info'
 rm *trim.fastq
@@ -22,7 +22,7 @@ rm *trim.fastq
 echo "Paired end read merging"
 mkdir ../pear
 #merge paired end reads
-ls *R1* | sed 's/.R1.trimprimer.fastq//' | parallel -j4 'pear -f {}.R1.trimprimer.fastq -r {}.R2.trimprimer.fastq -o ../pear/{} -q 30 -t 50 -n 50 1>../pear/{}.out'
+ls *R1* | sed 's/.R1.trimprimer.fastq//' | parallel -j4 'pear -f {}.R1.trimprimer.fastq -r {}.R2.trimprimer.fastq -o ../pear/{} -q 30 -n 50 -t 50 1>../pear/{}.out'
 rm *trimprimer.fastq
 cd ../pear
 #get stats on merge rates
@@ -68,29 +68,60 @@ mkdir vsearch
 #########################
 #get representative sequences from dereplicated and sorted sequences
 echo "Generating representative sequences file"
-vsearch --derep_full pear/combinedseq.fa --output pear/combinedseq.derep.fa --sizeout --minuniquesize 10
+vsearch --derep_full pear/combinedseq.fa --output pear/combinedseq.derep.fa --sizeout --minuniquesize 5
 vsearch --sortbylength pear/combinedseq.derep.fa --sizeout --output pear/combinedseq.sort.fa
-vsearch --cluster_unoise pear/combinedseq.sort.fa --relabel OTU_ --centroids vsearch/repset.fa --sizein --sizeout 
+vsearch --cluster_unoise pear/combinedseq.sort.fa --relabel OTU_ --centroids vsearch/repset.fa  
+rm pear/combinedseq.sort.fa pear/combinedseq.derep.fa
 
 #########################
 #Chimera check
 #########################
 echo "Chimera check"
 vsearch --uchime_denovo vsearch/repset.fa --chimeras vsearch/repset.chims.fa --nonchimeras vsearch/repset.nonchim.fa
+rm vsearch/repset.fa
 
 #########################
 #OTU picking
 #########################
 echo "Picking OTUs"
 vsearch --usearch_global pear/combinedseq.fa --db vsearch/repset.nonchim.fa --strand plus --uc vsearch/map.uc --maxaccepts 10 --id 0.99
+gzip pear/combinedseq.fa 
+biom from-uc -i vsearch/map.uc -o otus.biom
+biom summarize-table -i otus.biom -o otus.sum
 
 #########################
 #Taxonomy assignment
 #########################
 echo "Assigning taxonomy"
 mkdir tax
-## BLAST APPROACH
 echo "Get taxonomy assignments for repset using BLAST"
 ##NOTE: running these on the lab server, cruncher 1 
-#lower pid threshold to get more results, need to filter these by the length of the query alignment after the text file is generated
-cat repset.nonchim.fa | parallel --block 100k --recstart '>' --pipe blastn -evalue 1e-10 -max_target_seqs 500 -perc_identity 0.90 -db /parfreylab/shared/databases/NCBI_NT/NT_06.08.2018/nt -outfmt 6 -query - > blast.out
+#lower pid threshold to get more results, should be resolved with megan
+#below line for parallel, can't set outfmt columns
+#cat repset.nonchim.fa | parallel --block 50k --recstart '>' --pipe blastn -qcov_hsp_perc 0.90 -evalue 1e-10 -max_target_seqs 500 -perc_identity 0.90 -db /parfreylab/shared/databases/NCBI_NT/NT_06.08.2018/nt -outfmt 6 -query - > tax/blast.out
+blastn -evalue 1e-10 -max_target_seqs 500 -perc_identity 0.90 -db /parfreylab/shared/databases/NCBI_NT/NT_06.08.2018/nt -outfmt "6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore qlen" -query repset.nonchim.fa -out blast.out
+#remove hits that are less than 95% similar to the target, query length must be more than 90% when aligned to subject sequence
+awk '$4/$13 >= 0.95 && $3 >= 0.99 {print $0}' blast.out > goodblast.out
+#open in megan to get taxonomy
+#clean up taxonomy file
+sed -i 's/"root;cellular organisms;//' tax/taxonomy.txt
+sed -i 's/"//' tax/taxonomy.txt
+sed -i 's/ /_/g' tax/taxonomy.txt
+#add taxonomy to otu table
+biom add-metadata -i otus.biom -o otus.wtax.biom --observation-metadata-fp tax/taxonomy.txt --observation-header OTUID,taxonomy --sc-separated taxonomy
+#filter out those with no taxonomy and non microeuks
+filter_otus_from_otu_table.py -i otus.wtax.biom -o microeuk.biom --negate_ids_to_exclude -e tax/microeuk_tax.txt -n 100
+biom summarize-table -i microeuk.biom -o microeuk.sum
+biom convert -i microeuk.biom -o microeuk.txt --table-type="OTU table" --to-tsv --header-key taxonomy
+
+# Using ITSoneDB
+# alias uclust=$VSEARCH
+# assign_taxonomy.py -i vsearch/repset.nonchim.fa -t ~/refDB/ITSoneDB_rep_seq_1.131.tax -r ~/refDB/ITSoneDB_rep_seq_1.131.fasta -m uclust -o tax/
+
+#rarify
+single_rarefaction.py -i microeuk.biom -o microeuk.d10k.biom -d 10000
+biom convert -i microeuk.d10k.biom -o microeuk.d10k.txt --table-type="OTU table" --to-tsv --header-key taxonomy
+
+
+
+
