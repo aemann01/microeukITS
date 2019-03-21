@@ -85,6 +85,7 @@ rm vsearch/repset.fa
 #########################
 echo "Picking OTUs"
 vsearch --usearch_global pear/combinedseq.fa --db vsearch/repset.nonchim.fa --strand plus --uc vsearch/map.uc --maxaccepts 10 --id 0.99
+rm pear/combinedseq.fa.gz
 gzip pear/combinedseq.fa 
 biom from-uc -i vsearch/map.uc -o otus.biom
 biom summarize-table -i otus.biom -o otus.sum
@@ -109,8 +110,10 @@ sed -i 's/"//' tax/taxonomy.txt
 sed -i 's/ /_/g' tax/taxonomy.txt
 #add taxonomy to otu table
 biom add-metadata -i otus.biom -o otus.wtax.biom --observation-metadata-fp tax/taxonomy.txt --observation-header OTUID,taxonomy --sc-separated taxonomy
+#rarify
+single_rarefaction.py -i otus.wtax.biom -o otus.d1k.biom -d 1000
 #filter out those with no taxonomy and non microeuks
-filter_otus_from_otu_table.py -i otus.wtax.biom -o microeuk.biom --negate_ids_to_exclude -e tax/microeuk_tax.txt -n 100
+filter_otus_from_otu_table.py -i otus.d1k.biom -o microeuk.biom --negate_ids_to_exclude -e tax/microeuk_tax.txt -n 10
 biom summarize-table -i microeuk.biom -o microeuk.sum
 biom convert -i microeuk.biom -o microeuk.txt --table-type="OTU table" --to-tsv --header-key taxonomy
 
@@ -118,9 +121,7 @@ biom convert -i microeuk.biom -o microeuk.txt --table-type="OTU table" --to-tsv 
 # alias uclust=$VSEARCH
 # assign_taxonomy.py -i vsearch/repset.nonchim.fa -t ~/refDB/ITSoneDB_rep_seq_1.131.tax -r ~/refDB/ITSoneDB_rep_seq_1.131.fasta -m uclust -o tax/
 
-#rarify
-single_rarefaction.py -i microeuk.biom -o microeuk.d10k.biom -d 10000
-biom convert -i microeuk.d10k.biom -o microeuk.d10k.txt --table-type="OTU table" --to-tsv --header-key taxonomy
+
 
 
 
