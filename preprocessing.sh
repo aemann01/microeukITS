@@ -36,7 +36,7 @@ rm *discarded.fastq *unassembled.reverse.fastq
 find . -empty -delete
 
 #########################
-#Convert to fastq
+#Convert to fasta
 #########################
 echo "Fastq to fasta"
 #convert to fasta and add sequence headers to both the merged and unmerged forward reads
